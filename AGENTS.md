@@ -1,21 +1,21 @@
 # AGENTS.md
 
-## 项目目标
-这是一个投资助手项目初始骨架，核心文件如下：
+## 项目定位
+- 这是一个**规则型投资仓位计算工具**，不是择时系统。
+- 默认目标是：按照 `data/strategy.yaml` 与 `data/portfolio.yaml` 自动计算补仓/再平衡建议。
 
-- `strategy.yaml`：策略参数与目标权重。
-- `portfolio.yaml`：账户与持仓快照。
-- `rebalance.py`：根据策略与持仓生成再平衡建议。
-- `ibkr_sync.py`：IBKR 同步脚手架（模板）。
+## 数据源与可信度
+- `data/strategy.yaml` 与 `data/portfolio.yaml` 是唯一可信数据源。
+- 任何数字结论（占比、偏差、买入金额、买入股数、买后占比）都必须来自脚本计算，禁止靠模型心算或臆测。
+- 价格数据优先来自脚本抓取结果（例如 `data/price_cache.json`）。
 
-## 开发约定
-- 使用 Python 3.11+。
-- 优先保持脚本无外部服务依赖，默认可在离线环境运行。
-- 修改 YAML 结构时同步更新脚本字段读取逻辑。
-- 新增功能请保留 `--dry-run` 安全开关。
+## 持仓文件改动原则
+- 除非用户明确要求，否则不要修改 `data/portfolio.yaml`。
+- 持仓同步优先使用导入文件（IBKR Flex/CSV）。
+- 截图识别仅作为后备方案，不应作为默认更新路径。
 
-## 运行示例
-```bash
-python rebalance.py --strategy strategy.yaml --portfolio portfolio.yaml
-python ibkr_sync.py --portfolio portfolio.yaml --dry-run
-```
+## 编码与交付规范
+- 输出优先使用中文。
+- 改代码时尽量小步、可测试、可运行。
+- 每次改动后，尽量给出可直接运行的命令。
+- 保持实现清晰，避免过度工程化。
