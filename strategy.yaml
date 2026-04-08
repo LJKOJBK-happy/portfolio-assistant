@@ -1,0 +1,28 @@
+version: 1
+name: core_satellite_strategy
+base_currency: USD
+risk_profile: moderate
+rebalance:
+  frequency: monthly
+  drift_threshold_pct: 5.0
+  trade_buffer_pct: 1.0
+constraints:
+  max_single_asset_pct: 35
+  min_cash_pct: 2
+  max_turnover_pct: 30
+allocation:
+  core:
+    - symbol: VTI
+      target_pct: 45
+    - symbol: VXUS
+      target_pct: 20
+    - symbol: BND
+      target_pct: 20
+  satellite:
+    - symbol: QQQ
+      target_pct: 10
+    - symbol: GLD
+      target_pct: 5
+notes:
+  - "目标权重总和应为 100%。"
+  - "再平衡前请确认交易成本与税务影响。"
