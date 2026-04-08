@@ -1,0 +1,4 @@
+interface:
+  display_name: "Portfolio Assistant"
+  short_description: "Initialize holdings and generate rule-based buy plans"
+  default_prompt: "Use $portfolio-assistant to initialize my holdings first, then generate this month's rule-based contribution plan."

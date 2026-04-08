@@ -1,4 +1,2 @@
-pyyaml
-pandas
+PyYAML
 yfinance
-pytest
