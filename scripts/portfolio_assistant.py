@@ -16,6 +16,7 @@ from typing import Any
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STRATEGY_TEMPLATE = SKILL_ROOT / "assets" / "templates" / "default_strategy.yaml"
 DEFAULT_PORTFOLIO_TEMPLATE = SKILL_ROOT / "assets" / "templates" / "empty_portfolio.yaml"
+DEFAULT_REBALANCE_LEVEL = 1
 SUPPORTED_CURRENCIES = {"CNY", "USD", "GBP", "JPY"}
 CURRENCY_ALIASES = {
     "CNY": "CNY",
@@ -48,12 +49,14 @@ class HoldingSnapshot:
 
 @dataclass
 class CategorySnapshot:
+    key: str
     name: str
     target_weight: float
     current_value: float
     current_weight: float
     deviation: float
     holdings: list[HoldingSnapshot]
+    descendant_keys: list[str]
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -123,41 +126,173 @@ def unique_ordered(values: list[str]) -> list[str]:
     return output
 
 
+def split_group_path(value: str) -> list[str]:
+    parts = [item.strip() for item in str(value).split("/") if item.strip()]
+    if not parts:
+        raise ValueError(f"group 路径不能为空: {value}")
+    return parts
+
+
+def assign_group_path(root: dict[str, Any], path: str, tickers: list[str]) -> None:
+    parts = split_group_path(path)
+    current = root
+    for index, part in enumerate(parts):
+        is_leaf = index == len(parts) - 1
+        existing = current.get(part)
+
+        if is_leaf:
+            if existing is None:
+                current[part] = tickers
+                return
+            if isinstance(existing, list):
+                current[part] = unique_ordered(existing + tickers)
+                return
+            raise ValueError(f"group 路径冲突: {path}")
+
+        if existing is None:
+            current[part] = {}
+            current = current[part]
+            continue
+        if isinstance(existing, dict):
+            current = existing
+            continue
+        raise ValueError(f"group 路径冲突: {path}")
+
+
+def flatten_group_tree(
+    raw_groups: dict[str, Any],
+) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, str]]:
+    group_to_tickers: dict[str, list[str]] = {}
+    label_to_paths: dict[str, list[str]] = {}
+    ticker_to_group: dict[str, str] = {}
+
+    def walk(node: dict[str, Any], parent_path: str = "") -> list[str]:
+        descendant_tickers: list[str] = []
+        for raw_name, child in node.items():
+            label = str(raw_name).strip()
+            if not label:
+                raise ValueError("group 名称不能为空")
+
+            path = f"{parent_path}/{label}" if parent_path else label
+            label_to_paths.setdefault(label, []).append(path)
+
+            if isinstance(child, dict):
+                current_tickers = walk(child, path)
+            elif isinstance(child, list):
+                current_tickers = unique_ordered([normalize_ticker(item) for item in child if str(item).strip()])
+                if not current_tickers:
+                    raise ValueError(f"group {path} 不能为空")
+                for ticker in current_tickers:
+                    existing_group = ticker_to_group.get(ticker)
+                    if existing_group and existing_group != path:
+                        raise ValueError(f"ticker {ticker} 不能同时属于多个叶子 group: {existing_group}, {path}")
+                    ticker_to_group[ticker] = path
+            else:
+                raise ValueError(f"group {path} 格式错误，必须是子组对象或 ticker 列表")
+
+            group_to_tickers[path] = unique_ordered(current_tickers)
+            descendant_tickers.extend(current_tickers)
+
+        return unique_ordered(descendant_tickers)
+
+    walk(raw_groups)
+    return group_to_tickers, label_to_paths, ticker_to_group
+
+
+def resolve_group_path(name: str, group_to_tickers: dict[str, list[str]], label_to_paths: dict[str, list[str]]) -> str | None:
+    if name in group_to_tickers:
+        return name
+    matched_paths = label_to_paths.get(name, [])
+    if len(matched_paths) == 1:
+        return matched_paths[0]
+    if len(matched_paths) > 1:
+        raise ValueError(f"group 名称不唯一，请使用完整路径: {name}")
+    return None
+
+
+def parse_rebalance_level(value: Any) -> str | int:
+    if value is None or str(value).strip() == "":
+        return DEFAULT_REBALANCE_LEVEL
+    raw = str(value).strip().lower()
+    if raw == "target":
+        return "target"
+    level = int(raw)
+    if level <= 0:
+        raise ValueError("rebalance_level 必须是正整数或 target")
+    return level
+
+
+def path_depth(path: str) -> int:
+    return len(split_group_path(path))
+
+
+def path_at_level(path: str, level: int) -> str:
+    parts = split_group_path(path)
+    if level >= len(parts):
+        return path
+    return "/".join(parts[:level])
+
+
+def parse_rebalance_override_spec(spec: str) -> tuple[str, str | int]:
+    if "=" not in spec:
+        raise ValueError(f"rebalance_override 格式错误，应为 路径=层级: {spec}")
+    raw_path, raw_level = spec.split("=", 1)
+    path = raw_path.strip()
+    if not path:
+        raise ValueError("rebalance_override 路径不能为空")
+    split_group_path(path)
+    return path, parse_rebalance_level(raw_level.strip())
+
+
 def parse_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
     raw_groups = strategy.get("groups") or {}
     raw_targets = strategy.get("targets") or {}
     base_currency = canonicalize_currency(strategy.get("base_currency", "CNY"))
 
-    groups: dict[str, list[str]] = {}
-    ticker_to_group: dict[str, str] = {}
-    for group_name, tickers in raw_groups.items():
-        label = str(group_name)
-        normalized_tickers = unique_ordered([normalize_ticker(ticker) for ticker in (tickers or [])])
-        groups[label] = normalized_tickers
-        for ticker in normalized_tickers:
-            ticker_to_group.setdefault(ticker, label)
+    group_to_tickers, label_to_paths, ticker_to_group = flatten_group_tree(raw_groups)
 
     targets: dict[str, float] = {}
+    target_order: list[str] = []
     category_to_tickers: dict[str, list[str]] = {}
     tracked_tickers: list[str] = []
 
-    for name, weight in raw_targets.items():
-        label = str(name)
-        targets[label] = float(weight)
-        if label in groups:
-            category_tickers = groups[label][:]
-        else:
-            category_tickers = [normalize_ticker(label)]
-        category_to_tickers[label] = unique_ordered(category_tickers)
-        tracked_tickers.extend(category_to_tickers[label])
+    for raw_name, weight in raw_targets.items():
+        label = str(raw_name).strip()
+        if not label:
+            raise ValueError("target 名称不能为空")
 
-    for tickers in groups.values():
+        resolved_group_path = resolve_group_path(label, group_to_tickers, label_to_paths)
+        if resolved_group_path is not None:
+            canonical_name = resolved_group_path
+            category_tickers = group_to_tickers[resolved_group_path][:]
+        else:
+            canonical_name = normalize_ticker(label)
+            category_tickers = [canonical_name]
+
+        targets[canonical_name] = float(weight)
+        category_to_tickers[canonical_name] = unique_ordered(category_tickers)
+        if canonical_name not in target_order:
+            target_order.append(canonical_name)
+        tracked_tickers.extend(category_to_tickers[canonical_name])
+
+    target_sets: dict[str, set[str]] = {}
+    for category_name in target_order:
+        current_set = set(category_to_tickers[category_name])
+        for other_name, other_set in target_sets.items():
+            overlap = current_set & other_set
+            if overlap:
+                overlap_text = ", ".join(sorted(overlap))
+                raise ValueError(f"targets 不能重叠，{category_name} 与 {other_name} 都包含: {overlap_text}")
+        target_sets[category_name] = current_set
+
+    for tickers in group_to_tickers.values():
         tracked_tickers.extend(tickers)
 
     return {
         "base_currency": base_currency,
-        "groups": groups,
+        "groups": group_to_tickers,
         "targets": targets,
+        "target_order": target_order,
         "category_to_tickers": category_to_tickers,
         "ticker_to_group": ticker_to_group,
         "tracked_tickers": unique_ordered(tracked_tickers),
@@ -191,15 +326,16 @@ def parse_holding_spec(spec: str) -> dict[str, float | str]:
 
 def parse_group_spec(spec: str) -> tuple[str, list[str]]:
     if "=" not in spec:
-        raise ValueError(f"group 格式错误，应为 组名=TICKER1,TICKER2: {spec}")
+        raise ValueError(f"group 格式错误，应为 组路径=TICKER1,TICKER2: {spec}")
     raw_name, raw_tickers = spec.split("=", 1)
-    group_name = raw_name.strip()
-    if not group_name:
+    group_path = raw_name.strip()
+    if not group_path:
         raise ValueError("group 名称不能为空")
+    split_group_path(group_path)
     tickers = unique_ordered([normalize_ticker(item) for item in raw_tickers.split(",") if item.strip()])
     if not tickers:
-        raise ValueError(f"group {group_name} 不能为空")
-    return group_name, tickers
+        raise ValueError(f"group {group_path} 不能为空")
+    return group_path, tickers
 
 
 def parse_target_spec(spec: str) -> tuple[str, float]:
@@ -219,6 +355,8 @@ def apply_rebalance_rule_overrides(
     strategy: dict[str, Any],
     optional_threshold: float | None,
     mandatory_threshold: float | None,
+    rebalance_level: Any | None = None,
+    rebalance_overrides: list[str] | None = None,
 ) -> dict[str, Any]:
     rules = dict(strategy.get("rules") or {})
 
@@ -226,6 +364,15 @@ def apply_rebalance_rule_overrides(
         rules["optional_rebalance_threshold"] = float(optional_threshold)
     if mandatory_threshold is not None:
         rules["mandatory_rebalance_threshold"] = float(mandatory_threshold)
+    if rebalance_level is not None:
+        rules["rebalance_level"] = parse_rebalance_level(rebalance_level)
+    existing_overrides = rules.get("rebalance_overrides") if isinstance(rules.get("rebalance_overrides"), dict) else {}
+    normalized_overrides: dict[str, str | int] = {
+        str(path).strip(): parse_rebalance_level(level) for path, level in existing_overrides.items()
+    }
+    for spec in rebalance_overrides or []:
+        path, level = parse_rebalance_override_spec(spec)
+        normalized_overrides[path] = level
 
     optional_value = float(rules.get("optional_rebalance_threshold", 0.05) or 0.05)
     mandatory_value = float(rules.get("mandatory_rebalance_threshold", 0.08) or 0.08)
@@ -237,13 +384,22 @@ def apply_rebalance_rule_overrides(
     if optional_value > mandatory_value:
         raise ValueError("optional_rebalance_threshold 不能大于 mandatory_rebalance_threshold")
 
+    rules["rebalance_level"] = parse_rebalance_level(rules.get("rebalance_level", DEFAULT_REBALANCE_LEVEL))
+    if normalized_overrides:
+        rules["rebalance_overrides"] = normalized_overrides
+    elif "rebalance_overrides" in rules:
+        rules["rebalance_overrides"] = {}
+
     strategy["rules"] = rules
     return strategy
 
 
 def build_strategy_from_init_args(args: argparse.Namespace, current_strategy: dict[str, Any]) -> tuple[dict[str, Any], str]:
     has_rule_overrides = (
-        args.optional_rebalance_threshold is not None or args.mandatory_rebalance_threshold is not None
+        args.optional_rebalance_threshold is not None
+        or args.mandatory_rebalance_threshold is not None
+        or args.rebalance_level is not None
+        or bool(args.rebalance_override)
     )
 
     if not args.group and not args.target and args.base_currency is None and not has_rule_overrides:
@@ -256,6 +412,8 @@ def build_strategy_from_init_args(args: argparse.Namespace, current_strategy: di
             strategy,
             args.optional_rebalance_threshold,
             args.mandatory_rebalance_threshold,
+            args.rebalance_level,
+            args.rebalance_override,
         )
         return strategy, "default"
 
@@ -265,8 +423,8 @@ def build_strategy_from_init_args(args: argparse.Namespace, current_strategy: di
     strategy["targets"] = {}
 
     for spec in args.group:
-        group_name, tickers = parse_group_spec(spec)
-        strategy["groups"][group_name] = tickers
+        group_path, tickers = parse_group_spec(spec)
+        assign_group_path(strategy["groups"], group_path, tickers)
 
     for spec in args.target:
         target_name, weight = parse_target_spec(spec)
@@ -276,6 +434,8 @@ def build_strategy_from_init_args(args: argparse.Namespace, current_strategy: di
         strategy,
         args.optional_rebalance_threshold,
         args.mandatory_rebalance_threshold,
+        args.rebalance_level,
+        args.rebalance_override,
     )
     return strategy, "custom"
 
@@ -431,7 +591,7 @@ def tracked_tickers_for_runtime(strategy: dict[str, Any], portfolio: dict[str, A
     return unique_ordered(strategy_spec["tracked_tickers"] + list(positions.keys()))
 
 
-def build_category_snapshots(
+def build_leaf_category_snapshots(
     strategy: dict[str, Any], portfolio: dict[str, Any], prices: dict[str, float]
 ) -> tuple[list[CategorySnapshot], float, list[str]]:
     strategy_spec = parse_strategy(strategy)
@@ -459,9 +619,10 @@ def build_category_snapshots(
     category_specs: list[tuple[str, float, list[str]]] = []
     included_tickers: set[str] = set()
 
-    for category_name, target_weight in strategy_spec["targets"].items():
-        tickers = strategy_spec["category_to_tickers"].get(category_name, [])
-        category_specs.append((category_name, target_weight, tickers))
+    for category_key in strategy_spec["target_order"]:
+        target_weight = strategy_spec["targets"].get(category_key, 0.0)
+        tickers = strategy_spec["category_to_tickers"].get(category_key, [])
+        category_specs.append((category_key, target_weight, tickers))
         included_tickers.update(tickers)
 
     for ticker in positions.keys():
@@ -487,12 +648,14 @@ def build_category_snapshots(
         current_weight = (current_value / positions_value) if positions_value > 0 else 0.0
         categories.append(
             CategorySnapshot(
+                key=category_name,
                 name=category_name,
                 target_weight=float(target_weight),
                 current_value=current_value,
                 current_weight=current_weight,
                 deviation=current_weight - float(target_weight),
                 holdings=holdings,
+                descendant_keys=[category_name],
             )
         )
 
@@ -528,19 +691,117 @@ def build_rebalance_decision(strategy: dict[str, Any], categories: list[Category
     }
 
 
+def category_rebalance_base_path(category_key: str, strategy_spec: dict[str, Any]) -> str:
+    if category_key in strategy_spec["groups"]:
+        return category_key
+
+    group_path = strategy_spec["ticker_to_group"].get(category_key)
+    if group_path:
+        return group_path
+
+    return category_key
+
+
+def find_effective_rebalance_level(
+    category_key: str,
+    strategy_spec: dict[str, Any],
+    default_level: str | int,
+    rebalance_overrides: dict[str, str | int],
+) -> str | int:
+    if category_key in rebalance_overrides:
+        return rebalance_overrides[category_key]
+
+    base_path = category_rebalance_base_path(category_key, strategy_spec)
+    if "/" not in base_path:
+        return rebalance_overrides.get(base_path, default_level)
+
+    parts = split_group_path(base_path)
+    for index in range(len(parts), 0, -1):
+        prefix = "/".join(parts[:index])
+        if prefix in rebalance_overrides:
+            return rebalance_overrides[prefix]
+    return default_level
+
+
+def resolve_rebalance_bucket_key(
+    category_key: str,
+    strategy_spec: dict[str, Any],
+    default_level: str | int,
+    rebalance_overrides: dict[str, str | int],
+) -> str:
+    effective_level = find_effective_rebalance_level(category_key, strategy_spec, default_level, rebalance_overrides)
+    if effective_level == "target":
+        return category_key
+
+    base_path = category_rebalance_base_path(category_key, strategy_spec)
+    if "/" not in base_path:
+        return category_key
+    return path_at_level(base_path, int(effective_level))
+
+
+def build_rebalance_categories(
+    strategy: dict[str, Any], leaf_categories: list[CategorySnapshot], positions_value: float
+) -> tuple[list[CategorySnapshot], str | int, dict[str, str | int]]:
+    strategy_spec = parse_strategy(strategy)
+    rules = strategy.get("rules") or {}
+    rebalance_level = parse_rebalance_level(rules.get("rebalance_level", DEFAULT_REBALANCE_LEVEL))
+    raw_overrides = rules.get("rebalance_overrides") if isinstance(rules.get("rebalance_overrides"), dict) else {}
+    rebalance_overrides = {str(path).strip(): parse_rebalance_level(level) for path, level in raw_overrides.items()}
+
+    buckets: dict[str, dict[str, Any]] = {}
+    ordered_bucket_keys: list[str] = []
+
+    for category in leaf_categories:
+        bucket_key = resolve_rebalance_bucket_key(category.key, strategy_spec, rebalance_level, rebalance_overrides)
+        if bucket_key not in buckets:
+            buckets[bucket_key] = {
+                "target_weight": 0.0,
+                "current_value": 0.0,
+                "holdings": [],
+                "descendant_keys": [],
+            }
+            ordered_bucket_keys.append(bucket_key)
+
+        bucket = buckets[bucket_key]
+        bucket["target_weight"] += category.target_weight
+        bucket["current_value"] += category.current_value
+        bucket["descendant_keys"].append(category.key)
+        bucket["holdings"].extend(category.holdings)
+
+    categories: list[CategorySnapshot] = []
+    for bucket_key in ordered_bucket_keys:
+        bucket = buckets[bucket_key]
+        current_value = float(bucket["current_value"])
+        current_weight = (current_value / positions_value) if positions_value > 0 else 0.0
+        categories.append(
+            CategorySnapshot(
+                key=bucket_key,
+                name=bucket_key,
+                target_weight=float(bucket["target_weight"]),
+                current_value=current_value,
+                current_weight=current_weight,
+                deviation=current_weight - float(bucket["target_weight"]),
+                holdings=bucket["holdings"],
+                descendant_keys=unique_ordered(bucket["descendant_keys"]),
+            )
+        )
+
+    return categories, rebalance_level, rebalance_overrides
+
+
 def allocate_category_amounts(categories: list[CategorySnapshot], contribution: float) -> dict[str, float]:
-    underweights = {category.name: max(category.target_weight - category.current_weight, 0.0) for category in categories}
+    underweights = {category.key: max(category.target_weight - category.current_weight, 0.0) for category in categories}
     total_under = sum(underweights.values())
 
     if total_under <= 0:
         total_target = sum(category.target_weight for category in categories)
         return {
-            category.name: contribution * (category.target_weight / total_target if total_target > 0 else 0.0)
+            category.key: contribution * (category.target_weight / total_target if total_target > 0 else 0.0)
             for category in categories
         }
 
     return {
-        category.name: contribution * (underweights[category.name] / total_under)
+        category.key: contribution * (underweights[category.key] / total_under)
         for category in categories
     }
 
@@ -611,12 +872,58 @@ def allocate_whole_shares_within_category(
     return shares, remaining
 
 
+def allocate_within_rebalance_bucket(
+    bucket: CategorySnapshot,
+    leaf_categories_by_key: dict[str, CategorySnapshot],
+    bucket_amount: float,
+) -> dict[str, float]:
+    if bucket_amount <= 0:
+        return {holding.ticker: 0.0 for holding in bucket.holdings}
+
+    descendant_categories = [leaf_categories_by_key[key] for key in bucket.descendant_keys if key in leaf_categories_by_key]
+    if not descendant_categories:
+        return split_amount_within_category(bucket, bucket_amount)
+
+    if len(descendant_categories) == 1:
+        return split_amount_within_category(descendant_categories[0], bucket_amount)
+
+    descendant_target_total = sum(category.target_weight for category in descendant_categories)
+    pseudo_categories: list[CategorySnapshot] = []
+    for category in descendant_categories:
+        normalized_target = (
+            category.target_weight / descendant_target_total if descendant_target_total > 0 else 0.0
+        )
+        bucket_relative_weight = (category.current_value / bucket.current_value) if bucket.current_value > 0 else 0.0
+        pseudo_categories.append(
+            CategorySnapshot(
+                key=category.key,
+                name=category.name,
+                target_weight=normalized_target,
+                current_value=category.current_value,
+                current_weight=bucket_relative_weight,
+                deviation=bucket_relative_weight - normalized_target,
+                holdings=category.holdings,
+                descendant_keys=category.descendant_keys,
+            )
+        )
+
+    category_amounts = allocate_category_amounts(pseudo_categories, bucket_amount)
+    ticker_amounts = {holding.ticker: 0.0 for holding in bucket.holdings}
+    for category in descendant_categories:
+        allocated_amount = category_amounts.get(category.key, 0.0)
+        child_amounts = split_amount_within_category(category, allocated_amount)
+        for ticker, amount in child_amounts.items():
+            ticker_amounts[ticker] = ticker_amounts.get(ticker, 0.0) + amount
+    return ticker_amounts
+
+
 def build_report(
     strategy: dict[str, Any], portfolio: dict[str, Any], prices: dict[str, float], fx_rates: dict[str, float]
 ) -> dict[str, Any]:
     strategy_spec = parse_strategy(strategy)
     base_currency = strategy_spec["base_currency"]
-    categories, positions_value, missing_price_tickers = build_category_snapshots(strategy, portfolio, prices)
+    leaf_categories, positions_value, missing_price_tickers = build_leaf_category_snapshots(strategy, portfolio, prices)
+    categories, rebalance_level, rebalance_overrides = build_rebalance_categories(strategy, leaf_categories, positions_value)
     cash = get_portfolio_cash(portfolio)
     groups = []
     usd_to_base = usd_to_currency_rate(fx_rates, base_currency)
@@ -627,6 +934,7 @@ def build_report(
         groups.append(
             {
                 "name": category.name,
+                "path": category.key,
                 "target_weight": category.target_weight,
                 "current_value_usd": category.current_value,
                 "current_value": category.current_value * usd_to_base,
@@ -650,6 +958,8 @@ def build_report(
     return {
         "as_of": portfolio.get("as_of", ""),
         "base_currency": base_currency,
+        "rebalance_level": rebalance_level,
+        "rebalance_overrides": rebalance_overrides,
         "fx_rates": fx_rates,
         "positions_value_usd": positions_value,
         "positions_value": positions_value * usd_to_base,
@@ -675,10 +985,12 @@ def build_plan(
     strategy_spec = parse_strategy(strategy)
     base_currency = strategy_spec["base_currency"]
     usd_to_base = usd_to_currency_rate(fx_rates, base_currency)
-    categories, positions_value, missing_price_tickers = build_category_snapshots(strategy, portfolio, prices)
+    leaf_categories, positions_value, missing_price_tickers = build_leaf_category_snapshots(strategy, portfolio, prices)
+    categories, rebalance_level, rebalance_overrides = build_rebalance_categories(strategy, leaf_categories, positions_value)
+    leaf_categories_by_key = {category.key: category for category in leaf_categories}
     cash = get_portfolio_cash(portfolio)
     contribution_usd = convert_currency_to_usd(contribution, contribution_currency, fx_rates)
-    category_buy_amounts = {category.name: 0.0 for category in categories}
+    category_buy_amounts = {category.key: 0.0 for category in categories}
     if categories:
         category_buy_amounts.update(allocate_category_amounts(categories, contribution_usd))
 
@@ -687,8 +999,12 @@ def build_plan(
     after_positions_value = positions_value + contribution_usd
 
     for category in categories:
-        category_fractional_amount = category_buy_amounts.get(category.name, 0.0)
-        holding_fractional_amounts = split_amount_within_category(category, category_fractional_amount)
+        category_fractional_amount = category_buy_amounts.get(category.key, 0.0)
+        holding_fractional_amounts = allocate_within_rebalance_bucket(
+            category,
+            leaf_categories_by_key,
+            category_fractional_amount,
+        )
         whole_shares, category_remaining_cash = allocate_whole_shares_within_category(
             category,
             holding_fractional_amounts,
@@ -724,6 +1040,7 @@ def build_plan(
         groups.append(
             {
                 "name": category.name,
+                "path": category.key,
                 "target_weight": category.target_weight,
                 "current_value_usd": category.current_value,
                 "current_value": category.current_value * usd_to_base,
@@ -745,6 +1062,8 @@ def build_plan(
     return {
         "as_of": portfolio.get("as_of", ""),
         "base_currency": base_currency,
+        "rebalance_level": rebalance_level,
+        "rebalance_overrides": rebalance_overrides,
         "fx_rates": fx_rates,
         "positions_value_usd": positions_value,
         "positions_value": positions_value * usd_to_base,
@@ -776,6 +1095,9 @@ def print_report(report: dict[str, Any]) -> None:
     print("=" * 110)
     print(f"日期: {report.get('as_of', 'N/A')}")
     print(f"结算货币: {base_currency}")
+    print(f"再平衡层级: {report.get('rebalance_level', 'target')}")
+    if report.get("rebalance_overrides"):
+        print(f"再平衡覆盖: {report['rebalance_overrides']}")
     print(f"持仓合计: {report['positions_value']:.2f} {base_currency}")
     print(f"现金:     {report['cash']:.2f} {base_currency}")
     print(f"总资产:   {report['total_value']:.2f} {base_currency}\n")
@@ -825,6 +1147,9 @@ def print_plan(plan: dict[str, Any]) -> None:
     print("本月补仓计划（分组规则型，不择时）")
     print("=" * 120)
     print(f"结算货币:     {base_currency}")
+    print(f"再平衡层级:   {plan.get('rebalance_level', 'target')}")
+    if plan.get("rebalance_overrides"):
+        print(f"再平衡覆盖:   {plan['rebalance_overrides']}")
     print(f"买前持仓合计: {plan['positions_value']:.2f} {base_currency}")
     print(f"现金:         {plan['cash']:.2f} {base_currency}")
     print(f"买前总资产:   {plan['total_value_before']:.2f} {base_currency}")
@@ -960,6 +1285,8 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "cash_currency": portfolio["cash_currency"],
         "optional_rebalance_threshold": float((strategy.get("rules") or {}).get("optional_rebalance_threshold", 0.05) or 0.05),
         "mandatory_rebalance_threshold": float((strategy.get("rules") or {}).get("mandatory_rebalance_threshold", 0.08) or 0.08),
+        "rebalance_level": (strategy.get("rules") or {}).get("rebalance_level", DEFAULT_REBALANCE_LEVEL),
+        "rebalance_overrides": (strategy.get("rules") or {}).get("rebalance_overrides", {}),
         "positions_count": len(positions),
     }
 
@@ -974,12 +1301,15 @@ def command_update_rules(args: argparse.Namespace) -> dict[str, Any]:
     strategy = load_yaml(paths["strategy"]) or load_yaml(DEFAULT_STRATEGY_TEMPLATE)
 
     if args.optional_rebalance_threshold is None and args.mandatory_rebalance_threshold is None:
-        raise ValueError("至少提供一个再平衡阈值参数")
+        if args.rebalance_level is None and not args.rebalance_override:
+            raise ValueError("至少提供一个规则更新参数")
 
     strategy = apply_rebalance_rule_overrides(
         strategy,
         args.optional_rebalance_threshold,
         args.mandatory_rebalance_threshold,
+        args.rebalance_level,
+        args.rebalance_override,
     )
     write_yaml(paths["strategy"], strategy)
 
@@ -989,6 +1319,8 @@ def command_update_rules(args: argparse.Namespace) -> dict[str, Any]:
         "strategy_path": str(paths["strategy"]),
         "optional_rebalance_threshold": float(rules.get("optional_rebalance_threshold", 0.05) or 0.05),
         "mandatory_rebalance_threshold": float(rules.get("mandatory_rebalance_threshold", 0.08) or 0.08),
+        "rebalance_level": rules.get("rebalance_level", "target"),
+        "rebalance_overrides": rules.get("rebalance_overrides", {}),
     }
 
 
@@ -1112,6 +1444,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--base-currency", type=str, default=None)
     init_parser.add_argument("--optional-rebalance-threshold", type=float, default=None)
     init_parser.add_argument("--mandatory-rebalance-threshold", type=float, default=None)
+    init_parser.add_argument("--rebalance-level", type=str, default=None)
+    init_parser.add_argument("--rebalance-override", action="append", default=[])
     init_parser.add_argument("--as-of", type=str, default=None)
     init_parser.add_argument("--group", action="append", default=[])
     init_parser.add_argument("--target", action="append", default=[])
@@ -1125,6 +1459,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--base-currency", type=str, default=None)
     sync_parser.add_argument("--optional-rebalance-threshold", type=float, default=None)
     sync_parser.add_argument("--mandatory-rebalance-threshold", type=float, default=None)
+    sync_parser.add_argument("--rebalance-level", type=str, default=None)
+    sync_parser.add_argument("--rebalance-override", action="append", default=[])
     sync_parser.add_argument("--as-of", type=str, default=None)
     sync_parser.add_argument("--group", action="append", default=[])
     sync_parser.add_argument("--target", action="append", default=[])
@@ -1139,6 +1475,8 @@ def build_parser() -> argparse.ArgumentParser:
     update_rules_parser.add_argument("--workspace", type=str, default=None)
     update_rules_parser.add_argument("--optional-rebalance-threshold", type=float, default=None)
     update_rules_parser.add_argument("--mandatory-rebalance-threshold", type=float, default=None)
+    update_rules_parser.add_argument("--rebalance-level", type=str, default=None)
+    update_rules_parser.add_argument("--rebalance-override", action="append", default=[])
     update_rules_parser.add_argument("--json", action="store_true")
 
     report_parser = subparsers.add_parser("report", help="查看当前组合")

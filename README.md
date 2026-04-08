@@ -28,9 +28,28 @@
 - 主观择时
 - 替代券商对账单
 
+## 可以直接怎么说
+
+这个 skill 不要求用户会说专业术语，正常聊天就行。下面这些说法都适合：
+
+- “第一次用，你先帮我把现在的持仓记下来”
+- “我平时想按人民币看”
+- “我现在大概有 2 万人民币现金”
+- “VOO 大概 10 股，QQQM 大概 8 股，其他你继续问我”
+- “这个月我想再投 5000 美元，你帮我看看怎么分”
+- “先看看我现在偏得厉不厉害，要不要调仓”
+- “默认先按大类来算，海外这块你再拆细一点”
+- “偏差小一点我先不动，偏差大了你提醒我要调”
+
+如果用户完全不懂“再平衡”这个词，也没关系。可以把它理解成：
+
+- “仓位偏了要不要顺手调一调”
+- “哪一类涨太多或者掉太多了，要不要拉回目标比例”
+
 ## 核心特性
 
 - 支持 `groups` 资产分组，例如把 `VOO` 和 `CSPX` 归到同一类
+- `groups` 支持多级分组，至少可以写到三层以上
 - 报告占比不含现金，现金单独展示
 - 支持 `CNY / USD / GBP / JPY`
 - 支持货币别名归一化：
@@ -41,6 +60,7 @@
 - 每次 `report` / `rebalance` 默认先刷新价格和汇率
 - 输出会明确告诉你是否触发再平衡
 - 再平衡阈值支持初始化时设置，后续也可单独修改
+- 支持指定再平衡按哪一级分组做
 
 ## 安装方式
 
@@ -92,11 +112,21 @@ pip install -r requirements.txt
 4. 当前持有哪些资产，各自 `ticker / shares / avg_cost / last_price`
 5. 再平衡阈值是多少
 
+更口语一点的问法可以是：
+
+1. “你想直接用我这套默认组合，还是按你自己的来？”
+2. “你平时更想按人民币看，还是按美元看？”
+3. “你现在现金大概有多少？按什么币种算？”
+4. “你现在都买了哪些？每个大概有多少份？”
+5. “你想先按最外面的大类来算，还是某一块比如海外再拆细一点？”
+6. “偏差到什么程度你想让我提醒你该调仓？”
+
 默认值：
 
 - 默认结算货币：`CNY`
 - 可选再平衡阈值：`0.05`
 - 强制再平衡阈值：`0.08`
+- 再平衡层级：`1`，也就是最外层
 
 脚本初始化示例：
 
@@ -107,6 +137,7 @@ python3 scripts/portfolio_assistant.py init \
   --cash-currency CNY \
   --optional-rebalance-threshold 0.05 \
   --mandatory-rebalance-threshold 0.08 \
+  --rebalance-level 1 \
   --holding 'VOO,10,500,520' \
   --holding 'CSPX,1,700,706.3' \
   --holding 'QQQM,8,180,190'
@@ -117,10 +148,12 @@ python3 scripts/portfolio_assistant.py init \
 ```bash
 python3 scripts/portfolio_assistant.py init \
   --base-currency CNY \
-  --group 'S&P 500=VOO,CSPX' \
-  --group '纳斯达克 100=QQQM,CSNDX' \
-  --target 'S&P 500=0.20' \
-  --target '纳斯达克 100=0.20' \
+  --group '股票/海外/美国市场/S&P 500=VOO,CSPX' \
+  --group '股票/海外/美国市场/纳斯达克 100=QQQM,CSNDX' \
+  --group '股票/海外/日本市场=EWJ' \
+  --target '股票/海外/美国市场/S&P 500=0.20' \
+  --target '股票/海外/美国市场/纳斯达克 100=0.20' \
+  --target '股票/海外/日本市场=0.10' \
   --target 'TLT=0.10' \
   --target 'GLDM=0.10' \
   --cash 3000 \
@@ -129,6 +162,54 @@ python3 scripts/portfolio_assistant.py init \
   --mandatory-rebalance-threshold 0.08 \
   --holding 'VOO,10,500,520'
 ```
+
+`groups` 现在支持多级树结构。比如你可以把“股票”分成“国内 / 海外”，再把“海外”继续分成“日本市场 / 美国市场”。
+
+如果你直接编辑 `data/strategy.yaml`，结构可以写成这样：
+
+```yaml
+groups:
+  股票:
+    国内:
+      宽基: [510300, 159949]
+    海外:
+      日本市场: [EWJ]
+      美国市场:
+        S&P 500: [VOO, CSPX]
+        纳斯达克 100: [QQQM, CSNDX]
+
+targets:
+  股票/国内/宽基: 0.20
+  股票/海外/日本市场: 0.10
+  股票/海外/美国市场/S&P 500: 0.20
+  股票/海外/美国市场/纳斯达克 100: 0.20
+  TLT: 0.10
+  GLDM: 0.10
+```
+
+注意：
+
+- `targets` 推荐写完整路径
+- `targets` 之间不能重叠，不能同时写父组和它的子组
+- `rebalance_level` 用来指定再平衡按哪一级做
+
+例如：
+
+- `rebalance_level: 1` => 按第 1 层
+- `rebalance_level: 2` => 按第 2 层
+- `rebalance_level: 3` => 按第 3 层
+- `rebalance_level: target` => 按 `targets` 里的最终目标项
+
+如果你还想对子树单独细化，可以加覆盖规则，例如：
+
+```yaml
+rules:
+  rebalance_level: 1
+  rebalance_overrides:
+    股票/海外: 3
+```
+
+这表示默认按最外层再平衡，但 `股票/海外` 这棵子树按第 3 层拆开再平衡。
 
 ## 日常使用
 
@@ -167,7 +248,9 @@ python3 scripts/portfolio_assistant.py sync-holdings \
 ```bash
 python3 scripts/portfolio_assistant.py update-rules \
   --optional-rebalance-threshold 0.04 \
-  --mandatory-rebalance-threshold 0.07
+  --mandatory-rebalance-threshold 0.07 \
+  --rebalance-level 1 \
+  --rebalance-override '股票/海外=3'
 ```
 
 如果你在离线环境调试，不想触发在线刷新：
@@ -182,12 +265,15 @@ python3 scripts/portfolio_assistant.py rebalance --contribution 5000 --contribut
 安装完成后，首次可以直接对 agent 说：
 
 - “第一次用，先帮我初始化持仓”
+- “我想先把现在的组合录进去，你一步步问我”
 
 初始化完成后，后续通常只需要直接说：
 
 - “这个月我要投入 5000 美元，各个资产应该怎么投”
 - “先刷新价格和汇率，再看我现在要不要再平衡”
 - “把可选再平衡改成 4%，强制改成 7%”
+- “先按大类看要不要调仓，再把海外这块拆细一点”
+- “我还是想默认按最外层看，别拆太细”
 
 ## 数据存储位置
 

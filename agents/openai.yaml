@@ -1,4 +1,4 @@
 interface:
   display_name: "Portfolio Assistant"
   short_description: "Initialize holdings and generate rule-based buy plans"
-  default_prompt: "Use $portfolio-assistant to initialize my holdings first, then generate this month's rule-based contribution plan."
+  default_prompt: "Use $portfolio-assistant to help me记住我的持仓。先用口语化的问题一步步问清楚币种、现金、持仓和调仓习惯，再根据最新价格告诉我这次该怎么投。"

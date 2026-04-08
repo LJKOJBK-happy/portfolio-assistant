@@ -19,6 +19,7 @@ rules:
   buy_underweight_first: true
   optional_rebalance_threshold: 0.05
   mandatory_rebalance_threshold: 0.08
+  rebalance_level: 1
   prefer_whole_shares: true
   support_fractional_output: true
   ignore_market_timing: true

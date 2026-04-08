@@ -7,8 +7,9 @@
 1. 先问用户要使用默认组合方案，还是自定义组合方案。
 2. 再问用户默认结算货币；若用户没说，默认 `CNY`。
 3. 如果用户选择自定义，先收集 `groups` 和 `targets`。
+   多级分组时，要求用户给完整路径。
 4. 再询问用户当前持仓、现金和现金币种。
-5. 再问用户再平衡阈值；若用户没说，默认可选 `0.05`、强制 `0.08`。
+5. 再问用户再平衡阈值和再平衡层级；若用户没说，默认可选 `0.05`、强制 `0.08`、层级 `1`。
 6. 运行 `init` 写入本地 `data/` 文件。
 7. 告诉用户以后可以直接问自然语言问题。
 
@@ -21,6 +22,7 @@ python scripts/portfolio_assistant.py init \
   --cash-currency CNY \
   --optional-rebalance-threshold 0.05 \
   --mandatory-rebalance-threshold 0.08 \
+  --rebalance-level 1 \
   --holding 'VOO,10,500,520' \
   --holding 'CSPX,1,700,706.3' \
   --holding 'QQQM,8,180,190'
@@ -33,12 +35,15 @@ python scripts/portfolio_assistant.py init \
   --base-currency CNY \
   --optional-rebalance-threshold 0.05 \
   --mandatory-rebalance-threshold 0.08 \
-  --group 'S&P 500=VOO,CSPX' \
-  --group '纳斯达克 100=QQQM,CSNDX' \
-  --target 'S&P 500=0.20' \
-  --target '纳斯达克 100=0.20' \
+  --group '股票/海外/美国市场/S&P 500=VOO,CSPX' \
+  --group '股票/海外/美国市场/纳斯达克 100=QQQM,CSNDX' \
+  --group '股票/海外/日本市场=EWJ' \
+  --target '股票/海外/美国市场/S&P 500=0.20' \
+  --target '股票/海外/美国市场/纳斯达克 100=0.20' \
+  --target '股票/海外/日本市场=0.10' \
   --target 'TLT=0.10' \
   --cash 3000 \
+  --rebalance-level target \
   --holding 'VOO,10,500,520'
 ```
 
@@ -61,8 +66,10 @@ python scripts/portfolio_assistant.py rebalance \
 ```
 
 5. 读取返回里的 `rebalance_decision`，告诉用户是否触发再平衡。
-6. 若策略使用 `groups`，先看组级别偏差和建议金额，再看组内 ticker 拆分。
-7. 只根据脚本结果总结建议。
+6. 读取返回里的 `rebalance_level`，明确告诉用户当前是按哪一级做再平衡。
+   如果有 `rebalance_overrides`，也要告诉用户哪些子树用了覆盖规则。
+7. 若策略使用 `groups`，先看该层级桶的偏差和建议金额，再看桶内 ticker 拆分。
+8. 只根据脚本结果总结建议。
 
 ## 查看当前仓位
 
@@ -106,7 +113,9 @@ python scripts/portfolio_assistant.py sync-holdings \
 ```bash
 python scripts/portfolio_assistant.py update-rules \
   --optional-rebalance-threshold 0.04 \
-  --mandatory-rebalance-threshold 0.07
+  --mandatory-rebalance-threshold 0.07 \
+  --rebalance-level 1 \
+  --rebalance-override '股票/海外=3'
 ```
 
 ## 覆盖默认路径
