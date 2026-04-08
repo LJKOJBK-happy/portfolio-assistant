@@ -15,19 +15,26 @@ trap cleanup EXIT
 echo "[1/3] 初始化示例工作区"
 "$PYTHON_BIN" "$SCRIPT_DIR/portfolio_assistant.py" init \
   --workspace "$WORKSPACE" \
+  --base-currency USD \
   --cash 1500 \
+  --cash-currency USD \
   --holding 'VOO,4,500,520' \
+  --holding 'CSPX,1,700,706.3' \
   --holding 'QQQM,6,180,190' \
+  --holding 'ICOM,10,19,20' \
   --holding 'TLT,5,92,90' \
   --json
 
 echo "[2/3] 输出组合报告"
 "$PYTHON_BIN" "$SCRIPT_DIR/portfolio_assistant.py" report \
   --workspace "$WORKSPACE" \
+  --skip-refresh \
   --json
 
 echo "[3/3] 输出补仓建议"
 "$PYTHON_BIN" "$SCRIPT_DIR/portfolio_assistant.py" rebalance \
   --workspace "$WORKSPACE" \
   --contribution 5000 \
+  --contribution-currency USD \
+  --skip-refresh \
   --json

@@ -1,15 +1,19 @@
-base_currency: USD
+base_currency: CNY
+
+groups:
+  S&P 500: [VOO, CSPX]
+  纳斯达克 100: [QQQM, CSNDX]
+  大宗商品: [PDBC, ICOM]
 
 targets:
-  VOO: 0.20
-  QQQM: 0.20
+  S&P 500: 0.20
+  纳斯达克 100: 0.20
   TLT: 0.10
   IDTL: 0.15
   IDTP: 0.10
   BOXX: 0.05
   GLDM: 0.10
-  PDBC: 0.08
-  ICOM: 0.02
+  大宗商品: 0.10
 
 rules:
   buy_underweight_first: true
@@ -23,4 +27,4 @@ notes:
   - 这是长期规则型投资组合
   - 新钱优先买低配资产
   - 非必要不改结构
-  - 商品部分默认按 PDBC 80%、ICOM 20% 维持
+  - 同组资产先按组偏差计算，再拆分到组内 ticker
