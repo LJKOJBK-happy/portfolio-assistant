@@ -1,0 +1,26 @@
+base_currency: USD
+
+targets:
+  VOO: 0.20
+  QQQM: 0.20
+  TLT: 0.10
+  IDTL: 0.15
+  IDTP: 0.10
+  BOXX: 0.05
+  GLDM: 0.10
+  PDBC: 0.08
+  ICOM: 0.02
+
+rules:
+  buy_underweight_first: true
+  optional_rebalance_threshold: 0.05
+  mandatory_rebalance_threshold: 0.08
+  prefer_whole_shares: true
+  support_fractional_output: true
+  ignore_market_timing: true
+
+notes:
+  - 这是长期规则型投资组合
+  - 新钱优先买低配资产
+  - 非必要不改结构
+  - 商品部分默认按 PDBC 80%、ICOM 20% 维持
